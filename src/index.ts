@@ -206,6 +206,52 @@ async function executeCommand(cmd: Command): Promise<{ result?: unknown; error?:
       return { result: { results, log: logs.join('\n') } };
     }
 
+    case 'get_logs': {
+      const namespace = cmd.payload.namespace as string;
+      const podName = cmd.payload.podName as string | undefined;
+      const search = cmd.payload.search as string | undefined;
+      const tailLines = (cmd.payload.tailLines as number) || 200;
+
+      // If a specific pod is given, fetch its logs
+      if (podName) {
+        const log = await coreApi.readNamespacedPodLog({
+          name: podName,
+          namespace,
+          tailLines,
+        });
+        let lines = typeof log === 'string' ? log : '';
+        if (search) {
+          lines = lines.split('\n').filter(l => l.toLowerCase().includes(search.toLowerCase())).join('\n');
+        }
+        return { result: { pods: [{ name: podName, logs: lines }] } };
+      }
+
+      // Otherwise fetch logs for all pods in namespace
+      const podList = await coreApi.listNamespacedPod({ namespace });
+      const pods: Array<{ name: string; logs: string }> = [];
+      for (const pod of (podList.items || []).slice(0, 50)) {
+        const name = pod.metadata?.name || '';
+        if (!name) continue;
+        try {
+          const log = await coreApi.readNamespacedPodLog({
+            name,
+            namespace,
+            tailLines: Math.min(tailLines, 100),
+          });
+          let lines = typeof log === 'string' ? log : '';
+          if (search) {
+            lines = lines.split('\n').filter(l => l.toLowerCase().includes(search.toLowerCase())).join('\n');
+          }
+          if (lines.trim()) {
+            pods.push({ name, logs: lines });
+          }
+        } catch {
+          // Pod may not have logs (e.g. pending)
+        }
+      }
+      return { result: { pods } };
+    }
+
     default:
       return { error: `Unknown command type: ${cmd.type}` };
   }
