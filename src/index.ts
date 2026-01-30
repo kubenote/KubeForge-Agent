@@ -178,7 +178,7 @@ async function executeCommand(cmd: Command): Promise<{ result?: unknown; error?:
             // resource doesn't exist
           }
           if (exists) {
-            await client.patch(resource, undefined, undefined, 'kubeforge', true);
+            await client.patch(resource);
           } else {
             await client.create(resource);
           }
