@@ -1,0 +1,97 @@
+# KubeForge Agent - Raw kubectl install manifest
+# Usage: kubectl apply -f <this-file>
+# Or use the dynamic URL: kubectl apply -f "https://app.kubeforge.io/api/agent/install-manifest?token=YOUR_TOKEN&clusterName=YOUR_CLUSTER"
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: kubeforge-agent
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: kubeforge-agent
+  namespace: kubeforge-agent
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: kubeforge-agent
+rules:
+  - apiGroups: [""]
+    resources:
+      - namespaces
+      - services
+      - configmaps
+      - secrets
+      - persistentvolumeclaims
+    verbs: ["get", "list", "watch", "create", "update", "patch"]
+  - apiGroups: ["apps"]
+    resources:
+      - deployments
+      - statefulsets
+      - daemonsets
+    verbs: ["get", "list", "watch", "create", "update", "patch"]
+  - apiGroups: ["batch"]
+    resources:
+      - jobs
+      - cronjobs
+    verbs: ["get", "list", "watch", "create", "update", "patch"]
+  - apiGroups: ["networking.k8s.io"]
+    resources:
+      - ingresses
+    verbs: ["get", "list", "watch", "create", "update", "patch"]
+  - apiGroups: ["autoscaling"]
+    resources:
+      - horizontalpodautoscalers
+    verbs: ["get", "list", "watch", "create", "update", "patch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: kubeforge-agent
+subjects:
+  - kind: ServiceAccount
+    name: kubeforge-agent
+    namespace: kubeforge-agent
+roleRef:
+  kind: ClusterRole
+  name: kubeforge-agent
+  apiGroup: rbac.authorization.k8s.io
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: kubeforge-agent
+  namespace: kubeforge-agent
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: kubeforge-agent
+  template:
+    metadata:
+      labels:
+        app: kubeforge-agent
+    spec:
+      serviceAccountName: kubeforge-agent
+      containers:
+        - name: agent
+          image: ghcr.io/kubeforge/agent:latest
+          env:
+            - name: KUBEFORGE_TOKEN
+              value: "REPLACE_WITH_TOKEN"
+            - name: KUBEFORGE_API_URL
+              value: "REPLACE_WITH_API_URL"
+            - name: CLUSTER_NAME
+              value: "REPLACE_WITH_CLUSTER_NAME"
+          resources:
+            requests:
+              cpu: 50m
+              memory: 64Mi
+            limits:
+              cpu: 200m
+              memory: 128Mi
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1000

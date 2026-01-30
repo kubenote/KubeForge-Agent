@@ -1,0 +1,6 @@
+apiVersion: v2
+name: kubeforge-agent
+description: KubeForge Agent - connects your cluster to KubeForge SaaS
+type: application
+version: 0.1.0
+appVersion: "0.1.0"

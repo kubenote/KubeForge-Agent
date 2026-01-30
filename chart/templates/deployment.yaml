@@ -1,0 +1,32 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: kubeforge-agent
+  namespace: {{ .Release.Namespace }}
+spec:
+  replicas: {{ .Values.replicaCount }}
+  selector:
+    matchLabels:
+      app: kubeforge-agent
+  template:
+    metadata:
+      labels:
+        app: kubeforge-agent
+    spec:
+      serviceAccountName: kubeforge-agent
+      containers:
+        - name: agent
+          image: "{{ .Values.image.repository }}:{{ .Values.image.tag }}"
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          env:
+            - name: KUBEFORGE_TOKEN
+              value: {{ .Values.token | quote }}
+            - name: KUBEFORGE_API_URL
+              value: {{ .Values.apiUrl | quote }}
+            - name: CLUSTER_NAME
+              value: {{ .Values.clusterName | quote }}
+          resources:
+{{ toYaml .Values.resources | indent 12 }}
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1000
