@@ -77,7 +77,7 @@ spec:
       serviceAccountName: kubeforge-agent
       containers:
         - name: agent
-          image: ghcr.io/kubeforge/agent:latest
+          image: ghcr.io/kubenote/kubeforge-agent:latest
           env:
             - name: KUBEFORGE_TOKEN
               value: "REPLACE_WITH_TOKEN"
