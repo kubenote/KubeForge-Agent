@@ -151,8 +151,11 @@ async function executeCommand(cmd: Command): Promise<{ result?: unknown; error?:
     case 'apply_manifest': {
       const namespace = cmd.payload.namespace as string;
       const manifests = cmd.payload.manifests as string[];
-      const results: Array<{ resource: string; success: boolean; error?: string }> = [];
+      const results: Array<{ resource: string; success: boolean; error?: string; log?: string }> = [];
       const client = k8s.KubernetesObjectApi.makeApiClient(kc);
+      const logs: string[] = [];
+      logs.push(`Deploying ${manifests.length} resource(s) to namespace "${namespace}"`);
+      logs.push('');
 
       for (const manifestStr of manifests) {
         const obj = yaml.load(manifestStr) as Record<string, unknown>;
@@ -179,16 +182,28 @@ async function executeCommand(cmd: Command): Promise<{ result?: unknown; error?:
           }
           if (exists) {
             await client.patch(resource);
+            const action = `${resourceLabel} configured`;
+            logs.push(`  ✓ ${action}`);
+            results.push({ resource: resourceLabel, success: true, log: action });
           } else {
             await client.create(resource);
+            const action = `${resourceLabel} created`;
+            logs.push(`  ✓ ${action}`);
+            results.push({ resource: resourceLabel, success: true, log: action });
           }
-          results.push({ resource: resourceLabel, success: true });
         } catch (err) {
-          results.push({ resource: resourceLabel, success: false, error: err instanceof Error ? err.message : String(err) });
+          const msg = err instanceof Error ? err.message : String(err);
+          logs.push(`  ✗ ${resourceLabel} failed: ${msg}`);
+          results.push({ resource: resourceLabel, success: false, error: msg, log: `${resourceLabel} failed: ${msg}` });
         }
       }
 
-      return { result: results };
+      const succeeded = results.filter(r => r.success).length;
+      const failed = results.filter(r => !r.success).length;
+      logs.push('');
+      logs.push(`Done: ${succeeded} succeeded, ${failed} failed`);
+
+      return { result: { results, log: logs.join('\n') } };
     }
 
     default:
