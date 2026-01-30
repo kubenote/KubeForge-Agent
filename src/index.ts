@@ -170,10 +170,16 @@ async function executeCommand(cmd: Command): Promise<{ result?: unknown; error?:
           }
 
           const resource = obj as unknown as k8s.KubernetesObject & { metadata: { name: string } };
+          let exists = false;
           try {
             await client.read(resource);
-            await client.patch(resource, undefined, undefined, 'kubeforge', true);
+            exists = true;
           } catch {
+            // resource doesn't exist
+          }
+          if (exists) {
+            await client.patch(resource, undefined, undefined, 'kubeforge', true);
+          } else {
             await client.create(resource);
           }
           results.push({ resource: resourceLabel, success: true });
