@@ -151,7 +151,7 @@ async function executeCommand(cmd: Command): Promise<{ result?: unknown; error?:
       const namespace = cmd.payload.namespace as string;
       const manifests = cmd.payload.manifests as string[];
       const dryRun = cmd.payload.dryRun === true;
-      const results: Array<{ resource: string; success: boolean; error?: string; log?: string }> = [];
+      const results: Array<{ resource: string; success: boolean; error?: string; log?: string; diff?: string[] }> = [];
       const client = k8s.KubernetesObjectApi.makeApiClient(kc);
       const logs: string[] = [];
       const mode = dryRun ? 'Dry run' : 'Deploying';
@@ -175,34 +175,65 @@ async function executeCommand(cmd: Command): Promise<{ result?: unknown; error?:
 
           const resource = obj as unknown as k8s.KubernetesObject & { metadata: { name: string } };
           const dryRunParam = dryRun ? 'All' : undefined;
-          let exists = false;
+
+          // Read current live state
+          let liveObj: Record<string, unknown> | null = null;
           try {
-            await client.read(resource);
-            exists = true;
+            const live = await client.read(resource);
+            liveObj = live as unknown as Record<string, unknown>;
           } catch {
             // resource doesn't exist
           }
-          if (exists) {
+
+          if (liveObj) {
             await client.patch(resource, undefined, dryRunParam);
             const action = dryRun ? `${resourceLabel} validated (would update)` : `${resourceLabel} configured`;
             logs.push(`  ✓ ${action}`);
-            results.push({ resource: resourceLabel, success: true, log: action });
+
+            // Compute field-level diff for dry runs
+            const diffLines: string[] = [];
+            if (dryRun) {
+              const cleanedLive = cleanForDiff(liveObj);
+              const cleanedDesired = cleanForDiff(obj);
+              deepDiff(cleanedLive, cleanedDesired, '', diffLines);
+              if (diffLines.length === 0) {
+                logs.push('      (no changes)');
+              } else {
+                for (const line of diffLines) {
+                  logs.push(`      ${line}`);
+                }
+              }
+            }
+
+            results.push({ resource: resourceLabel, success: true, log: action, diff: diffLines });
           } else {
             await client.create(resource, undefined, dryRunParam);
             const action = dryRun ? `${resourceLabel} validated (would create)` : `${resourceLabel} created`;
             logs.push(`  ✓ ${action}`);
-            results.push({ resource: resourceLabel, success: true, log: action });
+
+            // For new resources, summarize what would be created
+            const diffLines: string[] = [];
+            if (dryRun) {
+              const cleaned = cleanForDiff(obj);
+              summarizeObject(cleaned, '', diffLines);
+              for (const line of diffLines) {
+                logs.push(`      ${line}`);
+              }
+            }
+
+            results.push({ resource: resourceLabel, success: true, log: action, diff: diffLines });
           }
+          logs.push('');
         } catch (err) {
           const msg = err instanceof Error ? err.message : String(err);
           logs.push(`  ✗ ${resourceLabel} failed: ${msg}`);
+          logs.push('');
           results.push({ resource: resourceLabel, success: false, error: msg, log: `${resourceLabel} failed: ${msg}` });
         }
       }
 
       const succeeded = results.filter(r => r.success).length;
       const failed = results.filter(r => !r.success).length;
-      logs.push('');
       logs.push(`Done: ${succeeded} passed, ${failed} failed`);
 
       return { result: { results, log: logs.join('\n'), dryRun } };
@@ -256,6 +287,156 @@ async function executeCommand(cmd: Command): Promise<{ result?: unknown; error?:
 
     default:
       return { error: `Unknown command type: ${cmd.type}` };
+  }
+}
+
+// Strip server-managed fields for clean diffing
+function cleanForDiff(obj: unknown): unknown {
+  if (Array.isArray(obj)) return obj.map(cleanForDiff);
+  if (obj && typeof obj === 'object') {
+    const o = obj as Record<string, unknown>;
+    const cleaned: Record<string, unknown> = {};
+    for (const [k, v] of Object.entries(o)) {
+      // Skip server-managed metadata fields
+      if (k === 'managedFields' || k === 'resourceVersion' || k === 'uid' ||
+          k === 'creationTimestamp' || k === 'generation' || k === 'selfLink' ||
+          k === 'status') continue;
+      // Skip kubectl annotations
+      if (k === 'annotations' && typeof v === 'object' && v) {
+        const annotations = { ...(v as Record<string, unknown>) };
+        delete annotations['kubectl.kubernetes.io/last-applied-configuration'];
+        delete annotations['deployment.kubernetes.io/revision'];
+        if (Object.keys(annotations).length > 0) {
+          cleaned[k] = annotations;
+        }
+        continue;
+      }
+      if (v === null || v === undefined) continue;
+      cleaned[k] = cleanForDiff(v);
+    }
+    return cleaned;
+  }
+  return obj;
+}
+
+// Format a value for display (compact)
+function formatValue(v: unknown): string {
+  if (v === null || v === undefined) return 'null';
+  if (typeof v === 'string') {
+    if (v.length > 80) return `"${v.substring(0, 77)}..."`;
+    return `"${v}"`;
+  }
+  if (typeof v === 'boolean' || typeof v === 'number') return String(v);
+  if (Array.isArray(v)) {
+    if (v.length === 0) return '[]';
+    const items = v.map(formatValue);
+    const joined = `[${items.join(', ')}]`;
+    return joined.length > 80 ? `[${v.length} items]` : joined;
+  }
+  if (typeof v === 'object') {
+    const keys = Object.keys(v as object);
+    if (keys.length === 0) return '{}';
+    if (keys.length <= 3) {
+      const pairs = keys.map(k => `${k}: ${formatValue((v as Record<string, unknown>)[k])}`);
+      const joined = `{${pairs.join(', ')}}`;
+      if (joined.length <= 80) return joined;
+    }
+    return `{${keys.length} fields}`;
+  }
+  return String(v);
+}
+
+// Deep diff two objects, producing human-readable change lines
+function deepDiff(live: unknown, desired: unknown, path: string, out: string[]): void {
+  if (live === desired) return;
+
+  // Both are primitives or different types
+  if (typeof live !== typeof desired || live === null || desired === null ||
+      typeof live !== 'object' || typeof desired !== 'object') {
+    if (live !== desired) {
+      out.push(`~ ${path}: ${formatValue(live)} → ${formatValue(desired)}`);
+    }
+    return;
+  }
+
+  const liveIsArray = Array.isArray(live);
+  const desiredIsArray = Array.isArray(desired);
+
+  // Array diff
+  if (liveIsArray && desiredIsArray) {
+    const liveArr = live as unknown[];
+    const desiredArr = desired as unknown[];
+    const maxLen = Math.max(liveArr.length, desiredArr.length);
+    for (let i = 0; i < maxLen; i++) {
+      const p = `${path}[${i}]`;
+      if (i >= liveArr.length) {
+        out.push(`+ ${p}: ${formatValue(desiredArr[i])}`);
+      } else if (i >= desiredArr.length) {
+        out.push(`- ${p}: ${formatValue(liveArr[i])}`);
+      } else {
+        deepDiff(liveArr[i], desiredArr[i], p, out);
+      }
+    }
+    return;
+  }
+
+  // Object diff
+  if (!liveIsArray && !desiredIsArray) {
+    const liveObj = live as Record<string, unknown>;
+    const desiredObj = desired as Record<string, unknown>;
+    const allKeys = new Set([...Object.keys(liveObj), ...Object.keys(desiredObj)]);
+
+    for (const key of allKeys) {
+      const p = path ? `${path}.${key}` : key;
+      if (!(key in liveObj)) {
+        out.push(`+ ${p}: ${formatValue(desiredObj[key])}`);
+      } else if (!(key in desiredObj)) {
+        out.push(`- ${p}: ${formatValue(liveObj[key])}`);
+      } else {
+        deepDiff(liveObj[key], desiredObj[key], p, out);
+      }
+    }
+    return;
+  }
+
+  // Type mismatch (array vs object)
+  out.push(`~ ${path}: ${formatValue(live)} → ${formatValue(desired)}`);
+}
+
+// Summarize a new object's key fields
+function summarizeObject(obj: unknown, path: string, out: string[]): void {
+  if (obj === null || obj === undefined) return;
+  if (typeof obj !== 'object') {
+    out.push(`+ ${path}: ${formatValue(obj)}`);
+    return;
+  }
+  if (Array.isArray(obj)) {
+    if (obj.length === 0) return;
+    // For arrays, show count and summarize first item
+    if (obj.length > 1) {
+      out.push(`+ ${path}: [${obj.length} items]`);
+    }
+    if (typeof obj[0] === 'object' && obj[0]) {
+      summarizeObject(obj[0], `${path}[0]`, out);
+    } else {
+      out.push(`+ ${path}[0]: ${formatValue(obj[0])}`);
+    }
+    return;
+  }
+  const o = obj as Record<string, unknown>;
+  for (const [k, v] of Object.entries(o)) {
+    const p = path ? `${path}.${k}` : k;
+    if (v === null || v === undefined) continue;
+    if (typeof v === 'object' && !Array.isArray(v) && Object.keys(v as object).length > 0) {
+      // Recurse into objects but cap depth
+      if (p.split('.').length < 5) {
+        summarizeObject(v, p, out);
+      } else {
+        out.push(`+ ${p}: ${formatValue(v)}`);
+      }
+    } else {
+      out.push(`+ ${p}: ${formatValue(v)}`);
+    }
   }
 }
 
