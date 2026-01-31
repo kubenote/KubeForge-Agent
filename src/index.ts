@@ -4,7 +4,6 @@ import yaml from 'js-yaml';
 const TOKEN = process.env.KUBEFORGE_TOKEN;
 const API_URL = process.env.KUBEFORGE_API_URL;
 const CLUSTER_NAME = process.env.CLUSTER_NAME || 'my-cluster';
-const POLL_INTERVAL = 1000;
 
 if (!TOKEN || !API_URL) {
   console.error('KUBEFORGE_TOKEN and KUBEFORGE_API_URL are required');
@@ -288,13 +287,12 @@ async function main() {
     }
   }
 
-  // Poll loop
+  // Long-poll loop — server holds request open until a command is available or ~25s timeout
+  console.log('Entering long-poll loop');
   while (running) {
-    let hadCommand = false;
     try {
       const cmd = await poll();
       if (cmd) {
-        hadCommand = true;
         console.log(`Executing command ${cmd.id}: ${cmd.type}`);
         try {
           const { result, error } = await executeCommand(cmd);
@@ -310,12 +308,11 @@ async function main() {
           await submitResult(cmd.id, 'failed', undefined, msg);
         }
       }
+      // Immediately re-poll — server controls the wait time via long polling
     } catch (err) {
       console.error('Poll error:', err instanceof Error ? err.message : err);
-    }
-    // Skip sleep if we just processed a command (check for more immediately)
-    if (!hadCommand) {
-      await new Promise((r) => setTimeout(r, POLL_INTERVAL));
+      // Back off on errors to avoid tight retry loops
+      await new Promise((r) => setTimeout(r, 3000));
     }
   }
 }
