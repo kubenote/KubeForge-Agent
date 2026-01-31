@@ -150,10 +150,12 @@ async function executeCommand(cmd: Command): Promise<{ result?: unknown; error?:
     case 'apply_manifest': {
       const namespace = cmd.payload.namespace as string;
       const manifests = cmd.payload.manifests as string[];
+      const dryRun = cmd.payload.dryRun === true;
       const results: Array<{ resource: string; success: boolean; error?: string; log?: string }> = [];
       const client = k8s.KubernetesObjectApi.makeApiClient(kc);
       const logs: string[] = [];
-      logs.push(`Deploying ${manifests.length} resource(s) to namespace "${namespace}"`);
+      const mode = dryRun ? 'Dry run' : 'Deploying';
+      logs.push(`${mode}: ${manifests.length} resource(s) to namespace "${namespace}"`);
       logs.push('');
 
       for (const manifestStr of manifests) {
@@ -172,6 +174,7 @@ async function executeCommand(cmd: Command): Promise<{ result?: unknown; error?:
           }
 
           const resource = obj as unknown as k8s.KubernetesObject & { metadata: { name: string } };
+          const dryRunParam = dryRun ? 'All' : undefined;
           let exists = false;
           try {
             await client.read(resource);
@@ -180,13 +183,13 @@ async function executeCommand(cmd: Command): Promise<{ result?: unknown; error?:
             // resource doesn't exist
           }
           if (exists) {
-            await client.patch(resource);
-            const action = `${resourceLabel} configured`;
+            await client.patch(resource, undefined, dryRunParam);
+            const action = dryRun ? `${resourceLabel} validated (would update)` : `${resourceLabel} configured`;
             logs.push(`  ✓ ${action}`);
             results.push({ resource: resourceLabel, success: true, log: action });
           } else {
-            await client.create(resource);
-            const action = `${resourceLabel} created`;
+            await client.create(resource, undefined, dryRunParam);
+            const action = dryRun ? `${resourceLabel} validated (would create)` : `${resourceLabel} created`;
             logs.push(`  ✓ ${action}`);
             results.push({ resource: resourceLabel, success: true, log: action });
           }
@@ -200,9 +203,9 @@ async function executeCommand(cmd: Command): Promise<{ result?: unknown; error?:
       const succeeded = results.filter(r => r.success).length;
       const failed = results.filter(r => !r.success).length;
       logs.push('');
-      logs.push(`Done: ${succeeded} succeeded, ${failed} failed`);
+      logs.push(`Done: ${succeeded} passed, ${failed} failed`);
 
-      return { result: { results, log: logs.join('\n') } };
+      return { result: { results, log: logs.join('\n'), dryRun } };
     }
 
     case 'get_logs': {
