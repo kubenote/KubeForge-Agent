@@ -10,6 +10,7 @@
   },
   "dependencies": {
     "@kubernetes/client-node": "^1.0.0",
+    "@supabase/supabase-js": "^2.93.3",
     "js-yaml": "^4.1.0"
   },
   "devDependencies": {
