@@ -1,9 +1,12 @@
 import * as k8s from '@kubernetes/client-node';
 import yaml from 'js-yaml';
+import { createClient, type RealtimeChannel } from '@supabase/supabase-js';
 
 const TOKEN = process.env.KUBEFORGE_TOKEN;
 const API_URL = process.env.KUBEFORGE_API_URL;
 const CLUSTER_NAME = process.env.CLUSTER_NAME || 'my-cluster';
+const SUPABASE_URL = process.env.SUPABASE_URL || '';
+const SUPABASE_ANON_KEY = process.env.SUPABASE_ANON_KEY || '';
 
 if (!TOKEN || !API_URL) {
   console.error('KUBEFORGE_TOKEN and KUBEFORGE_API_URL are required');
@@ -20,6 +23,9 @@ try {
 
 let agentId: string | null = null;
 let running = true;
+let realtimeConnected = false;
+let realtimeChannel: RealtimeChannel | null = null;
+const HEARTBEAT_INTERVAL = 30_000;
 
 async function register(): Promise<string> {
   // Get cluster version
@@ -458,6 +464,66 @@ function cleanManifest(obj: Record<string, unknown>): Record<string, unknown> {
   return cleaned;
 }
 
+async function handleCommand(cmd: Command) {
+  console.log(`Executing command ${cmd.id}: ${cmd.type}`);
+  try {
+    const { result, error } = await executeCommand(cmd);
+    if (error) {
+      await submitResult(cmd.id, 'failed', undefined, error);
+    } else {
+      await submitResult(cmd.id, 'completed', result);
+    }
+    console.log(`Command ${cmd.id} completed`);
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    console.error(`Command ${cmd.id} failed:`, msg);
+    await submitResult(cmd.id, 'failed', undefined, msg);
+  }
+}
+
+function startRealtime() {
+  if (!SUPABASE_URL || !SUPABASE_ANON_KEY || !agentId) {
+    console.log('Supabase Realtime not configured, using polling only');
+    return;
+  }
+
+  const supabase = createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
+  realtimeChannel = supabase.channel(`agent:${agentId}`);
+
+  realtimeChannel
+    .on('broadcast', { event: 'command' }, (payload) => {
+      const cmd = payload.payload as Command;
+      if (cmd && cmd.id) {
+        handleCommand(cmd);
+      }
+    })
+    .subscribe((status) => {
+      if (status === 'SUBSCRIBED') {
+        realtimeConnected = true;
+        console.log('Realtime connected');
+      } else if (status === 'CLOSED' || status === 'CHANNEL_ERROR') {
+        realtimeConnected = false;
+        console.warn('Realtime disconnected, falling back to polling');
+      }
+    });
+}
+
+async function sendHeartbeat() {
+  if (!agentId) return;
+  try {
+    await fetch(`${API_URL}/api/agent/heartbeat`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'Authorization': `Bearer ${TOKEN}`,
+      },
+      body: JSON.stringify({ agentId }),
+    });
+  } catch {
+    // Heartbeat failure is non-critical — poll will also update heartbeat
+  }
+}
+
 async function main() {
   console.log(`KubeForge Agent starting - cluster: ${CLUSTER_NAME}, API: ${API_URL}`);
 
@@ -471,33 +537,42 @@ async function main() {
     }
   }
 
-  // Long-poll loop — server holds request open until a command is available or ~25s timeout
-  console.log('Entering long-poll loop');
+  // Start Realtime subscription
+  startRealtime();
+
+  // Heartbeat on a fixed interval
+  const heartbeatTimer = setInterval(sendHeartbeat, HEARTBEAT_INTERVAL);
+
+  // Polling fallback loop — only active when Realtime is disconnected
+  console.log('Entering poll loop (fallback when Realtime is down)');
+  let consecutiveEmpty = 0;
   while (running) {
     try {
+      if (realtimeConnected) {
+        // Realtime is handling commands; just sleep and check periodically
+        await new Promise((r) => setTimeout(r, 5000));
+        continue;
+      }
+
       const cmd = await poll();
       if (cmd) {
-        console.log(`Executing command ${cmd.id}: ${cmd.type}`);
-        try {
-          const { result, error } = await executeCommand(cmd);
-          if (error) {
-            await submitResult(cmd.id, 'failed', undefined, error);
-          } else {
-            await submitResult(cmd.id, 'completed', result);
-          }
-          console.log(`Command ${cmd.id} completed`);
-        } catch (err) {
-          const msg = err instanceof Error ? err.message : String(err);
-          console.error(`Command ${cmd.id} failed:`, msg);
-          await submitResult(cmd.id, 'failed', undefined, msg);
-        }
+        consecutiveEmpty = 0;
+        await handleCommand(cmd);
+      } else {
+        // Exponential backoff when no commands (cap at 30s, server already holds 25s)
+        consecutiveEmpty = Math.min(consecutiveEmpty + 1, 5);
+        const backoff = Math.min(1000 * Math.pow(1.5, consecutiveEmpty), 30_000);
+        await new Promise((r) => setTimeout(r, backoff));
       }
-      // Immediately re-poll — server controls the wait time via long polling
     } catch (err) {
       console.error('Poll error:', err instanceof Error ? err.message : err);
-      // Back off on errors to avoid tight retry loops
       await new Promise((r) => setTimeout(r, 3000));
     }
+  }
+
+  clearInterval(heartbeatTimer);
+  if (realtimeChannel) {
+    realtimeChannel.unsubscribe();
   }
 }
 
